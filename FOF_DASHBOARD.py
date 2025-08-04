@@ -27,8 +27,16 @@ def calculate_metrics(df_selected):
     max_drawdowns = []
     longest_drawdowns = []
 
+    downside_vols = []
+    win_rates = []
+    avg_wins = []
+    avg_losses = []
+    profit_factors = []
+
     for col in returns.columns:
-        cumulative = (1 + returns[col]).cumprod()
+        col_returns = returns[col]
+
+        cumulative = (1 + col_returns).cumprod()
         running_max = cumulative.cummax()
         drawdown = (cumulative - running_max) / running_max
 
@@ -47,14 +55,55 @@ def calculate_metrics(df_selected):
                 current_len = 0
         longest_drawdowns.append(max_len)
 
+        # Downside volatility
+        downside_returns = col_returns[col_returns < 0]
+        downside_std = downside_returns.std() if not downside_returns.empty else 0
+        downside_vol = downside_std * np.sqrt(365)
+        downside_vols.append(downside_vol)
+
+        # Win Rate: % of positive return days over whole period
+        positive = col_returns > 0
+        win_rate = positive.mean() if len(col_returns) > 0 else 0
+        win_rates.append(win_rate)
+
+        # Average Daily Profit
+        avg_win = col_returns[positive].mean() if positive.any() else 0
+        avg_wins.append(avg_win)
+
+        # Lose Rate (internal for profit factor): % of negative return days over whole period
+        negative = col_returns < 0
+        lose_rate = negative.mean() if len(col_returns) > 0 else 0
+
+        # Average Daily Loss (positive magnitude)
+        avg_loss_mag = -col_returns[negative].mean() if negative.any() else 0  # negative mean, so - to make positive
+        avg_losses.append(avg_loss_mag)
+
+        # Profit Factor
+        if lose_rate > 0 and avg_loss_mag > 0:
+            profit_factor = (win_rate * avg_win) / (lose_rate * avg_loss_mag)
+        else:
+            profit_factor = np.inf if win_rate > 0 else 0
+        profit_factors.append(profit_factor)
+
     max_drawdown = pd.Series(max_drawdowns, index=returns.columns)
     longest_drawdown_length = pd.Series(longest_drawdowns, index=returns.columns)
+    downside_vol = pd.Series(downside_vols, index=returns.columns)
+    win_rate_series = pd.Series(win_rates, index=returns.columns)
+    avg_win_series = pd.Series(avg_wins, index=returns.columns)
+    avg_loss_series = pd.Series(avg_losses, index=returns.columns)
+    profit_factor_series = pd.Series(profit_factors, index=returns.columns)
 
     sharpe_ratio = annualized_return / annualized_volatility
+    sharpe_ratio = sharpe_ratio.replace([np.inf, -np.inf], 0).fillna(0)
 
     calmar_ratio = annualized_return / max_drawdown.abs()
+    calmar_ratio = calmar_ratio.replace([np.inf, -np.inf], 0).fillna(0)
 
-    metrics_df = pd.DataFrame({
+    sortino_ratio = annualized_return / downside_vol
+    sortino_ratio = sortino_ratio.replace([np.inf, -np.inf], 0).fillna(0)
+
+    # First part of metrics
+    metrics_df1 = pd.DataFrame({
         "Cumulative Return": cumulative_return,
         "Annualized Return": annualized_return,
         "Annualized Volatility": annualized_volatility,
@@ -62,9 +111,29 @@ def calculate_metrics(df_selected):
         "Longest Drawdown (days)": longest_drawdown_length,
         "Sharpe Ratio": sharpe_ratio,
         "Calmar Ratio": calmar_ratio,
+        "Sortino Ratio": sortino_ratio,
     })
 
+    # Second part of metrics (removed Lose Rate)
+    metrics_df2 = pd.DataFrame({
+        "Win Rate": win_rate_series,
+        "Average Daily Profit": avg_win_series,
+        "Average Daily Loss": avg_loss_series,
+        "Profit Factor": profit_factor_series,
+    })
+
+    # Transpose both
+    metrics_df1 = metrics_df1.T
+    metrics_df2 = metrics_df2.T
+
+    # Create blank row with NaN
+    blank_df = pd.DataFrame(index=[""], columns=metrics_df1.columns)
+
+    # Concatenate: first part, blank, second part
+    metrics_df = pd.concat([metrics_df1, blank_df, metrics_df2])
+
     metrics_df = metrics_df.round(4)
+    metrics_df = metrics_df.fillna("")  # Replace NaN with empty string for blank row
 
     return metrics_df
 
@@ -135,52 +204,120 @@ def main():
 
     data_selected = data[selected_strategies].dropna()
 
-    # Layout: Use columns to organize the four parts nicely
-    # Part 1: Metrics dashboard at top
-    
+    # Define red font function
+    def red_font_if_negative(val):
+        try:
+            return 'color: red' if float(val) < 0 else ''
+        except (ValueError, TypeError):
+            return ''
+
+    # Format dict
     format_dict = {
-    "Cumulative Return": "{:.2%}",
-    "Annualized Return": "{:.2%}",
-    "Annualized Volatility": "{:.2%}",
-    "Max Drawdown": "{:.2%}",
-    "Longest Drawdown (days)": "{:.0f}",  # integer format
-    "Sharpe Ratio": "{:.2f}",  # 2 decimal
-    "Calmar Ratio": "{:.2f}"   # 2 decimal
+        "Cumulative Return": "{:.2%}",
+        "Annualized Return": "{:.2%}",
+        "Annualized Volatility": "{:.2%}",
+        "Max Drawdown": "{:.2%}",
+        "Longest Drawdown (days)": "{:.0f}",
+        "Sharpe Ratio": "{:.2f}",
+        "Calmar Ratio": "{:.2f}",
+        "Sortino Ratio": "{:.2f}",
+        "Win Rate": "{:.2%}",
+        "Average Daily Profit": "{:.2%}",
+        "Average Daily Loss": "{:.2%}",
+        "Profit Factor": "{:.2f}"
     }
     
+    # Part 1: Key Metrics
     st.subheader("1. Key Metrics")
     metrics_df = calculate_metrics(data_selected)
-    st.dataframe(metrics_df.style.format(format_dict))
+    styled = metrics_df.style
+    for metric, fmt in format_dict.items():
+        styled = styled.format(fmt, subset=pd.IndexSlice[metric, :])
+    styled = styled.map(red_font_if_negative)
+    st.dataframe(styled)
 
     # Part 2: Cumulative Return chart
     st.subheader("2. Cumulative Return Chart")
     cum_fig = plot_cumulative_returns(data_selected)
     st.plotly_chart(cum_fig, use_container_width=True)
 
-
-    # Part 4: Cumulative Return by Year table
+    # Part 3: Cumulative Return by Year table
     cum_return_year_df = cumulative_return_by_year(data_selected)
     
     # Sort by year ascending
     cum_return_year_df = cum_return_year_df.sort_index(ascending=True)
     
-    def red_font_if_negative(val):
-        try:
-            return 'color: red' if val < 0 else ''  # red font if negative
-        except:
-            return ''  # in case of non-numeric cells
-    
-    styled_yearly = cum_return_year_df.style.format("{:.2%}").map(red_font_if_negative)
+    styled_yearly = cum_return_year_df.style.map(red_font_if_negative).format("{:.2%}")
     
     st.subheader("3. Cumulative Return by Year")
     st.dataframe(styled_yearly)
 
-    # Part 3: Correlation matrix heatmap for more than 2 strategies
+    # Part 4: Correlation matrix heatmap for more than 2 strategies
     if len(selected_strategies) > 2:
         st.subheader("4. Correlation Matrix Heatmap")
         corr_fig = plot_correlation_matrix(data_selected)
         st.plotly_chart(corr_fig, use_container_width=True)
 
+    # Part 5: Strategy Combination
+    st.subheader("5. Strategy Combination")
+
+    if selected_strategies:
+        col1, col2 = st.columns([2, 3])
+        with col1:
+            weights = {}
+            total = 0.0
+            # Header
+            h1, h2 = st.columns([3,1])
+            h1.write("Strategy")
+            h2.write("Weights (%)")
+            for strat in selected_strategies:
+                c1, c2 = st.columns([3,1])
+                c1.write(strat)
+                initial_value = 100.0 / len(selected_strategies)
+                weight = c2.number_input(
+                    "Weight",
+                    key=f"weight_{strat}",
+                    min_value=0.0,
+                    value=initial_value,
+                    step=0.01,
+                    format="%.2f",
+                    label_visibility="collapsed"
+                )
+                weights[strat] = weight
+                total += weight
+            # Sum row
+            s1, s2 = st.columns([3,1])
+            s1.write("Total")
+            s2.write(f"{total:.2f}")
+
+        with col2:
+            run_button = st.button("Run")
+
+        if run_button:
+            if total == 0:
+                st.warning("Sum of weights is 0.")
+            else:
+                combined_returns = pd.Series(0, index=data_selected.index)
+                for strat, weight in weights.items():
+                    combined_returns += (weight / 100.0) * data_selected[strat]
+                combined_df = pd.DataFrame({"Combined": combined_returns})
+                metrics_combined = calculate_metrics(combined_df)
+                cbstyled = metrics_combined.style
+                for metric, fmt in format_dict.items():
+                    cbstyled = cbstyled.format(fmt, subset=pd.IndexSlice[metric, :])
+                cbstyled = cbstyled.map(red_font_if_negative)
+                
+                cum_fig_combined = plot_cumulative_returns(combined_df)
+
+                output_col1, output_col2 = st.columns(2)
+                with output_col1:
+                    st.subheader("Combined Cumulative Return Chart")
+                    st.plotly_chart(cum_fig_combined, use_container_width=True)
+                with output_col2:
+                    st.subheader("Combined Strategy Metrics")
+                    st.dataframe(cbstyled, use_container_width=True)
+    else:
+        st.info("Select strategies to combine.")
 
 #if __name__ == "__main__":
 main()
