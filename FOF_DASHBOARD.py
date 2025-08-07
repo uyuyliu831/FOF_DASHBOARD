@@ -185,7 +185,7 @@ def cumulative_return_by_year(df_selected):
     return cum_returns_df
 
 def main():
-    st.title("Strategy Returns Dashboard")
+    st.title("Autonomous - Strategy Performance & Risk Dashboard")
 
     uploaded_file = st.file_uploader("Upload CSV with Date and strategy daily returns", type=["csv"])
     if uploaded_file is None:
@@ -321,4 +321,5 @@ def main():
 
 #if __name__ == "__main__":
 main()
+
 
